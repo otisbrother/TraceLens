@@ -1,0 +1,97 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: tracelens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tracelens_local_db}
+      POSTGRES_DB: tracelens
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracelens -d tracelens"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  migrate-and-seed:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: postgresql+psycopg://tracelens:${POSTGRES_PASSWORD:-tracelens_local_db}@db:5432/tracelens
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-tracelens-local}
+      LLM_MODE: ${LLM_MODE:-mock}
+      RETRIEVAL_MODE: ${RETRIEVAL_MODE:-lexical}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "uv run --no-dev alembic upgrade head &&
+             uv run --no-dev python -m data.generator.seed --seed 42 --split demo"
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://tracelens:${POSTGRES_PASSWORD:-tracelens_local_db}@db:5432/tracelens
+      CHECKPOINT_PATH: /var/lib/tracelens/checkpoints.sqlite
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-tracelens-local}
+      MCP_SIGNING_SECRET: ${MCP_SIGNING_SECRET:-tracelens-local-scope-secret-v1}
+      LLM_MODE: ${LLM_MODE:-mock}
+      RETRIEVAL_MODE: ${RETRIEVAL_MODE:-lexical}
+      TOOL_TRANSPORT: ${TOOL_TRANSPORT:-direct}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOWED_ORIGINS: http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5173,http://localhost:5173
+    volumes:
+      - runtime_state:/var/lib/tracelens
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate-and-seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: postgresql+psycopg://tracelens:${POSTGRES_PASSWORD:-tracelens_local_db}@db:5432/tracelens
+      CHECKPOINT_PATH: /var/lib/tracelens/checkpoints.sqlite
+      MCP_SIGNING_SECRET: ${MCP_SIGNING_SECRET:-tracelens-local-scope-secret-v1}
+      LLM_MODE: ${LLM_MODE:-mock}
+      RETRIEVAL_MODE: ${RETRIEVAL_MODE:-lexical}
+      TOOL_TRANSPORT: ${TOOL_TRANSPORT:-direct}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+    volumes:
+      - runtime_state:/var/lib/tracelens
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate-and-seed:
+        condition: service_completed_successfully
+    command: ["uv", "run", "--no-dev", "python", "-m", "apps.worker.main"]
+
+volumes:
+  pgdata:
+  runtime_state:
+
