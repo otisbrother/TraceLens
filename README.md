@@ -7,6 +7,53 @@ TraceLens giúp điều tra viên xem chuyến đi, thiết bị, sổ voucher v
 Cảnh báo upstream là tín hiệu cần kiểm tra; đề xuất của workflow không phải kết luận gian lận.
 Ứng dụng độc lập, không liên kết doanh nghiệp và không tác động tài khoản hay thanh toán thật.
 
+## Sơ đồ dự án
+
+### Kiến trúc tổng quan
+
+```mermaid
+flowchart TD
+    User["Điều tra viên / Người duyệt / Kiểm toán viên"] <--> Web["React + TypeScript<br/>Hồ sơ, bằng chứng, duyệt và audit"]
+    Web <-->|"HTTP API / Session"| API["FastAPI<br/>Kiểm tra quyền tenant, role và hồ sơ"]
+    Seed["Generator dữ liệu tổng hợp<br/>Chuyến đi, thiết bị, voucher và SOP"] --> DB[("Database nghiệp vụ<br/>SQLite local / PostgreSQL Compose")]
+    API <--> DB
+    API -->|"Tạo job trong database"| Queue["Hàng đợi jobs<br/>Lease, retry và fencing"]
+    Queue --> Worker["Worker riêng / LangGraph<br/>B: checklist cố định · C: chọn bước tiếp"]
+    Worker <-->|"Lưu trạng thái / interrupt"| Checkpoint[("SQLite checkpoint<br/>Dùng chung API và worker")]
+    API <-->|"Resume sau khi duyệt"| Checkpoint
+    Worker --> Tools["Typed read-only tools<br/>Direct hoặc MCP stdio"]
+    Tools --> Domain["Domain services + RAG<br/>Giới hạn scope và truy xuất SOP"]
+    Domain -->|"Chỉ đọc dữ liệu điều tra"| DB
+    Worker -->|"Lưu báo cáo, bằng chứng và audit"| DB
+```
+
+Database nghiệp vụ lưu cả nguồn, hồ sơ, jobs và kết quả. Checkpoint là kho SQLite riêng;
+PostgreSQL trong sơ đồ là cấu hình Compose, chưa được kiểm chứng runtime.
+Mặc định dùng mock và lexical retrieval, không cần API key.
+
+### Luồng từ dữ liệu đến quyết định
+
+```mermaid
+flowchart LR
+    Data["Dữ liệu tổng hợp"] --> Rules["Luật cảnh báo"]
+    Rules --> Case["Cảnh báo + hồ sơ"]
+    Case --> Run["Điều tra B / C<br/>Có giới hạn lượt gọi"]
+    Run --> Evidence["Bằng chứng đã thu thập<br/>Nguồn, phản bác và dữ liệu thiếu"]
+    Evidence --> Validate{"Kiểm chứng báo cáo"}
+    Validate -->|"Hợp lệ"| Report["Báo cáo có phiên bản<br/>Tạm dừng chờ duyệt"]
+    Validate -->|"Vẫn lỗi sau bước sửa giới hạn"| Manual["Chuyển kiểm tra thủ công"]
+    Report --> Review["Người duyệt<br/>Quyết định + lý do"]
+    Review --> Resume["Lưu quyết định<br/>Resume checkpoint"]
+    Resume --> Audit["Audit + Export JSON / Markdown"]
+    Manual --> Audit
+    Run -.->|"Ghi sự kiện trong quá trình chạy"| Audit
+```
+
+Thiếu nguồn hoặc chưa thu thập đủ bằng chứng có thể tạo báo cáo `INSUFFICIENT_EVIDENCE` để người duyệt xử lý.
+Quyết định gắn với version/hash/snapshot; nếu resume lỗi, trạng thái `review_pending_resume`
+giữ quyết định đã lưu để worker thử lại. Audit được ghi xuyên suốt luồng, không chỉ ở bước cuối.
+Chi tiết ranh giới quyền và state machine: [ARCHITECTURE](docs/ARCHITECTURE.md).
+
 ## Chạy local trên Windows
 
 Cần Python **3.12**, Node **24**, `uv`. Chạy từ gốc repository:
